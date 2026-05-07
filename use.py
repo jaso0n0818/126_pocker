@@ -1,6 +1,4 @@
 import torch
-import torch.nn as nn
-import torch.nn.functional as F
 from torch.utils.data import Dataset, DataLoader
 import numpy as np
 import os
@@ -13,6 +11,7 @@ import time
 from pathlib import Path
 
 from poker44.utils.hand_features import extract_chunk_features
+from poker44.utils.miner_model import MinerNet
 
 
 REPO_ROOT = Path(__file__).resolve().parent
@@ -35,20 +34,6 @@ class Poker44Dataset(Dataset):
 
     def __getitem__(self, idx):
         return self.features[idx]
-
-# -----------------------------
-# 2️⃣ 모델 정의
-# -----------------------------
-class MinerNet(nn.Module):
-    def __init__(self, input_dim=13, hidden_dim=32):
-        super(MinerNet, self).__init__()
-        self.fc1 = nn.Linear(input_dim, hidden_dim)
-        self.fc2 = nn.Linear(hidden_dim, 1)
-
-    def forward(self, x):
-        x = F.relu(self.fc1(x))
-        x = torch.sigmoid(self.fc2(x))  # 0~1 점수
-        return x.squeeze(1)
 
 # -----------------------------
 # 3️⃣ Miner 클래스 정의

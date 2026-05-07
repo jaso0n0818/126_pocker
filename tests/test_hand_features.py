@@ -1,6 +1,7 @@
 import unittest
 
 from poker44.utils.hand_features import (
+    CHUNK_FEATURE_NAMES,
     FEATURE_NAMES,
     extract_chunk_features,
     extract_hand_features,
@@ -23,7 +24,10 @@ class HandFeatureTests(unittest.TestCase):
             },
         }
 
-        self.assertEqual(extract_chunk_features(hand), extract_hand_features(hand))
+        hand_features = extract_hand_features(hand)
+        expected = hand_features + [0.0] * len(FEATURE_NAMES) + hand_features + hand_features
+
+        self.assertEqual(extract_chunk_features(hand), expected)
 
     def test_multi_hand_chunk_averages_hand_features(self):
         hand_a = {
@@ -44,15 +48,28 @@ class HandFeatureTests(unittest.TestCase):
             "outcome": {"showdown": True, "total_pot": 0.08, "payouts": {}},
         }
 
-        expected = [
+        means = [
             (a + b) / 2.0
             for a, b in zip(extract_hand_features(hand_a), extract_hand_features(hand_b))
         ]
+        stds = [
+            (((a - mean) ** 2 + (b - mean) ** 2) / 2.0) ** 0.5
+            for a, b, mean in zip(extract_hand_features(hand_a), extract_hand_features(hand_b), means)
+        ]
+        mins = [
+            min(a, b)
+            for a, b in zip(extract_hand_features(hand_a), extract_hand_features(hand_b))
+        ]
+        maxs = [
+            max(a, b)
+            for a, b in zip(extract_hand_features(hand_a), extract_hand_features(hand_b))
+        ]
+        expected = means + stds + mins + maxs
 
         self.assertEqual(extract_chunk_features([hand_a, hand_b]), expected)
 
     def test_empty_chunk_returns_zero_vector(self):
-        self.assertEqual(extract_chunk_features([]), [0.0] * len(FEATURE_NAMES))
+        self.assertEqual(extract_chunk_features([]), [0.0] * len(CHUNK_FEATURE_NAMES))
 
 
 if __name__ == "__main__":

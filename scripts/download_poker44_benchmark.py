@@ -63,6 +63,8 @@ def _flatten_release(payload: dict[str, Any]) -> dict[str, Any]:
     ground_truth: list[int] = []
     ground_truth_labels: list[str] = []
     source_batch_ids: list[str] = []
+    source_dates: list[str] = []
+    source_date = str(data.get("sourceDate") or "")
 
     for row in release_rows:
         row_chunks = list(row.get("chunks") or [])
@@ -77,6 +79,7 @@ def _flatten_release(payload: dict[str, Any]) -> dict[str, Any]:
         ground_truth.extend(int(label) for label in row_truth)
         ground_truth_labels.extend(str(label) for label in row_labels)
         source_batch_ids.extend([str(row.get("chunkId") or "")] * len(row_chunks))
+        source_dates.extend([source_date] * len(row_chunks))
 
     return {
         "source": "poker44_training_benchmark",
@@ -88,6 +91,7 @@ def _flatten_release(payload: dict[str, Any]) -> dict[str, Any]:
         "groundTruth": ground_truth,
         "groundTruthLabels": ground_truth_labels,
         "sourceBatchIds": source_batch_ids,
+        "sourceDates": source_dates,
     }
 
 
@@ -140,6 +144,7 @@ def main() -> int:
     combined_chunks: list[Any] = []
     combined_truth: list[int] = []
     combined_truth_labels: list[str] = []
+    combined_source_dates: list[str] = []
 
     for release in releases:
         source_date = str(release["sourceDate"])
@@ -158,6 +163,7 @@ def main() -> int:
         combined_chunks.extend(flattened["chunks"])
         combined_truth.extend(flattened["groundTruth"])
         combined_truth_labels.extend(flattened["groundTruthLabels"])
+        combined_source_dates.extend(flattened.get("sourceDates") or [source_date] * len(flattened["chunks"]))
 
         register_entries.append(
             {
@@ -178,6 +184,7 @@ def main() -> int:
         "chunks": combined_chunks,
         "groundTruth": combined_truth,
         "groundTruthLabels": combined_truth_labels,
+        "sourceDates": combined_source_dates,
     }
     combined_path = output_dir / "poker44_benchmark_all.json.gz"
     _write_gzip_json(combined_path, combined)

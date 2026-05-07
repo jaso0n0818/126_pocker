@@ -36,30 +36,6 @@ class Miner(BaseMinerNeuron):
         super(Miner, self).__init__(config=config)
         bt.logging.info("🤖 Heuristic Poker44 Miner started")
         repo_root = Path(__file__).resolve().parents[1]
-        self.model_manifest = build_local_model_manifest(
-            repo_root=repo_root,
-            implementation_files=[Path(__file__).resolve()],
-            defaults={
-                "model_name": "poker44-reference-heuristic",
-                "model_version": "1",
-                "framework": "python-heuristic",
-                "license": "MIT",
-                "repo_url": "https://github.com/Poker44/Poker44-subnet",
-                "notes": "Reference heuristic miner shipped with the Poker44 subnet.",
-                "open_source": True,
-                "inference_mode": "remote",
-                "training_data_statement": (
-                    "Reference heuristic miner. No training step. Uses only runtime chunk features."
-                ),
-                "training_data_sources": ["none"],
-                "private_data_attestation": (
-                    "This reference miner does not train on validator-only evaluation data."
-                ),
-            },
-        )
-        self.manifest_compliance = evaluate_manifest_compliance(self.model_manifest)
-        self.manifest_digest = manifest_digest(self.model_manifest)
-        self._log_manifest_startup(repo_root)
         self.repo_root = repo_root
         self.auto_retrain_enabled = _env_bool("POKER44_AUTO_RETRAIN", False)
         self.use_trained_model = _env_bool("POKER44_USE_TRAINED_MODEL", False)
@@ -73,6 +49,14 @@ class Miner(BaseMinerNeuron):
             )
         )
         self.auto_retrain_state_path = self.register_path.parent / "auto_retrain_state.json"
+        self.model_manifest = build_local_model_manifest(
+            repo_root=repo_root,
+            implementation_files=[Path(__file__).resolve()],
+            defaults=self._manifest_defaults(),
+        )
+        self.manifest_compliance = evaluate_manifest_compliance(self.model_manifest)
+        self.manifest_digest = manifest_digest(self.model_manifest)
+        self._log_manifest_startup(repo_root)
         self._auto_retrain_lock = threading.Lock()
         self._auto_retrain_running = False
         self._model_lock = threading.Lock()
@@ -113,6 +97,45 @@ class Miner(BaseMinerNeuron):
             f"miner_doc={repo_root / 'docs' / 'miner.md'}"
         )
 
+    def _manifest_defaults(self) -> dict:
+        common = {
+            "license": "MIT",
+            "repo_url": "https://github.com/Poker44/Poker44-subnet",
+            "open_source": True,
+            "inference_mode": "remote",
+            "private_data_attestation": (
+                "This miner trains only on public Poker44 benchmark releases and does not train on "
+                "validator-only private evaluation data."
+            ),
+        }
+        if self.use_trained_model:
+            return {
+                **common,
+                "model_name": "poker44-benchmark-minernet",
+                "model_version": "1",
+                "framework": "pytorch",
+                "notes": "Chunk-level neural miner trained from public Poker44 benchmark releases.",
+                "training_data_statement": (
+                    "Trained on public released Poker44 benchmark chunks recorded in "
+                    f"{self.register_path}."
+                ),
+                "training_data_sources": [
+                    "https://api.poker44.net/api/v1/benchmark",
+                    str(self.register_path),
+                ],
+            }
+        return {
+            **common,
+            "model_name": "poker44-reference-heuristic",
+            "model_version": "1",
+            "framework": "python-heuristic",
+            "notes": "Reference heuristic miner shipped with the Poker44 subnet.",
+            "training_data_statement": (
+                "Reference heuristic miner. No training step. Uses only runtime chunk features."
+            ),
+            "training_data_sources": ["none"],
+        }
+
     async def forward(self, synapse: DetectionSynapse) -> DetectionSynapse:
         """Assign one deterministic bot-risk score per chunk."""
         chunks = synapse.chunks or []
@@ -135,19 +158,7 @@ class Miner(BaseMinerNeuron):
     def _load_torch_model(self) -> bool:
         try:
             import torch
-            import torch.nn as nn
-            import torch.nn.functional as F
-
-            class MinerNet(nn.Module):
-                def __init__(self, input_dim=13, hidden_dim=32):
-                    super().__init__()
-                    self.fc1 = nn.Linear(input_dim, hidden_dim)
-                    self.fc2 = nn.Linear(hidden_dim, 1)
-
-                def forward(self, x):
-                    x = F.relu(self.fc1(x))
-                    x = torch.sigmoid(self.fc2(x))
-                    return x.squeeze(1)
+            from poker44.utils.miner_model import MinerNet
 
             if not self.model_path.exists():
                 bt.logging.warning(f"Trained model file not found: {self.model_path}")

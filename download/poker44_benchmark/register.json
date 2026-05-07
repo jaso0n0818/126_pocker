@@ -2,16 +2,16 @@
   "apiBase": "https://api.poker44.net/api/v1/benchmark",
   "combined": {
     "bot_chunks": 1660,
-    "bytes": 15998292,
+    "bytes": 15998502,
     "chunk_count": 3320,
     "hand_count": 199297,
     "human_chunks": 1660,
     "max_hands_per_chunk": 80,
     "min_hands_per_chunk": 40,
     "path": "download/poker44_benchmark/poker44_benchmark_all.json.gz",
-    "sha256": "860b8426d06fa22ccf0e0c34e07aedd7e5cd27552f56b2be494099bd27202277"
+    "sha256": "abe16a79cd0848914040c7d2837c57dad91f46d193d5d820a9087d7d06e0662d"
   },
-  "createdAt": "2026-05-07T20:18:13+00:00",
+  "createdAt": "2026-05-07T21:59:14+00:00",
   "releases": [
     {
       "bot_chunks": 220,

@@ -1,6 +1,5 @@
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
 from torch.utils.data import Dataset, DataLoader
 import numpy as np
 import os
@@ -10,6 +9,7 @@ import argparse
 from collections import Counter
 
 from poker44.utils.hand_features import extract_chunk_features, normalize_label
+from poker44.utils.miner_model import MinerNet
 
 # -----------------------------
 # 1️⃣ Dataset 정의
@@ -29,26 +29,13 @@ class Poker44Dataset(Dataset):
         return self.features[idx], self.labels[idx]
 
 # -----------------------------
-# 2️⃣ 모델 정의
-# -----------------------------
-class MinerNet(nn.Module):
-    def __init__(self, input_dim=13, hidden_dim=32):
-        super(MinerNet, self).__init__()
-        self.fc1 = nn.Linear(input_dim, hidden_dim)
-        self.fc2 = nn.Linear(hidden_dim, 1)
-
-    def forward(self, x):
-        x = F.relu(self.fc1(x))
-        x = torch.sigmoid(self.fc2(x))
-        return x.squeeze(1)
-
-# -----------------------------
 # 3️⃣ 학습 함수
 # -----------------------------
-def load_dataset(filepath):
+def load_dataset(filepath, return_metadata=False):
     """Load poker hands dataset from gzipped JSON file."""
     chunks = []
     labels = []
+    metadata = {}
     
     with gzip.open(filepath, 'rt', encoding='utf-8') as f:
         data = json.load(f)
@@ -58,6 +45,7 @@ def load_dataset(filepath):
     if isinstance(data, dict) and "chunks" in data and "groundTruth" in data:
         chunks = list(data["chunks"])
         labels = [int(label) for label in data["groundTruth"]]
+        metadata["sourceDates"] = list(data.get("sourceDates") or [])
     else:
         if isinstance(data, list):
             hands = data
@@ -79,12 +67,107 @@ def load_dataset(filepath):
     label_counts = Counter(labels)
     print(f"Loaded {len(chunks)} examples from {filepath}")
     print(f"Label distribution: human={label_counts.get(0, 0)} bot={label_counts.get(1, 0)}")
+    if return_metadata:
+        return chunks, labels, metadata
     return chunks, labels
 
 # -----------------------------
 # 4️⃣ 학習 함数
 # -----------------------------
-def train_model(chunks, labels, epochs=10, batch_size=32, lr=1e-3, allow_single_class=False):
+def _split_indices(labels, validation_split=0.2, seed=44, source_dates=None, validation_source_date=None):
+    if validation_source_date and source_dates:
+        val_indices = [
+            index
+            for index, source_date in enumerate(source_dates)
+            if str(source_date) == str(validation_source_date)
+        ]
+        val_set = set(val_indices)
+        train_indices = [index for index in range(len(labels)) if index not in val_set]
+        if val_indices and train_indices:
+            return train_indices, val_indices
+
+    rng = np.random.default_rng(seed)
+    train_indices = []
+    val_indices = []
+    labels_array = np.asarray(labels)
+    for label in sorted(set(labels)):
+        indices = np.where(labels_array == label)[0]
+        rng.shuffle(indices)
+        val_count = int(round(len(indices) * validation_split))
+        if validation_split > 0 and len(indices) > 1:
+            val_count = max(1, min(val_count, len(indices) - 1))
+        val_indices.extend(indices[:val_count].tolist())
+        train_indices.extend(indices[val_count:].tolist())
+    rng.shuffle(train_indices)
+    rng.shuffle(val_indices)
+    return train_indices, val_indices
+
+
+def _subset(items, indices):
+    return [items[index] for index in indices]
+
+
+def _average_precision(y_true, y_score):
+    order = np.argsort(-y_score)
+    sorted_true = y_true[order]
+    positives = int(np.sum(sorted_true == 1))
+    if positives == 0:
+        return 0.0
+    true_positives = 0
+    precision_sum = 0.0
+    for rank, label in enumerate(sorted_true, start=1):
+        if int(label) == 1:
+            true_positives += 1
+            precision_sum += true_positives / rank
+    return float(precision_sum / positives)
+
+
+def _reward(y_pred, y_true):
+    preds = np.round(y_pred).astype(int)
+    y_true = y_true.astype(int)
+    tn = int(np.sum((y_true == 0) & (preds == 0)))
+    fp = int(np.sum((y_true == 0) & (preds == 1)))
+    fn = int(np.sum((y_true == 1) & (preds == 0)))
+    tp = int(np.sum((y_true == 1) & (preds == 1)))
+    negative_count = max(tn + fp, 1)
+    positive_count = max(tp + fn, 1)
+    fpr = fp / negative_count
+    bot_recall = tp / positive_count
+    ap_score = _average_precision(y_true, y_pred)
+    human_safety_penalty = max(0.0, 1.0 - fpr) ** 2
+    if fpr >= 0.10:
+        human_safety_penalty = 0.0
+    base_score = 0.65 * ap_score + 0.35 * bot_recall
+    reward_value = base_score * human_safety_penalty
+    return reward_value, {
+        "fpr": fpr,
+        "bot_recall": bot_recall,
+        "ap_score": ap_score,
+        "human_safety_penalty": human_safety_penalty,
+        "base_score": base_score,
+        "reward": reward_value,
+    }
+
+
+def _evaluate_model(model, device, chunks, labels, batch_size=128):
+    scores = np.asarray(predict_scores(model, device, chunks, batch_size=batch_size), dtype=np.float32)
+    labels_array = np.asarray(labels, dtype=np.int64)
+    reward_value, metrics = _reward(scores, labels_array)
+    return reward_value, metrics
+
+
+def train_model(
+    chunks,
+    labels,
+    epochs=10,
+    batch_size=32,
+    lr=1e-3,
+    allow_single_class=False,
+    validation_split=0.2,
+    source_dates=None,
+    validation_source_date=None,
+    seed=44,
+):
     label_counts = Counter(labels)
     if len(label_counts) < 2 and not allow_single_class:
         raise ValueError(
@@ -92,13 +175,27 @@ def train_model(chunks, labels, epochs=10, batch_size=32, lr=1e-3, allow_single_
             "or rerun with --allow-single-class if you intentionally want a constant model."
         )
 
-    dataset = Poker44Dataset(chunks, labels)
+    train_indices, val_indices = _split_indices(
+        labels,
+        validation_split=validation_split,
+        seed=seed,
+        source_dates=source_dates,
+        validation_source_date=validation_source_date,
+    )
+    train_chunks = _subset(chunks, train_indices)
+    train_labels = _subset(labels, train_indices)
+    val_chunks = _subset(chunks, val_indices)
+    val_labels = _subset(labels, val_indices)
+
+    dataset = Poker44Dataset(train_chunks, train_labels)
     loader = DataLoader(dataset, batch_size=batch_size, shuffle=True)
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     model = MinerNet().to(device)
     optimizer = torch.optim.Adam(model.parameters(), lr=lr)
     criterion = nn.BCELoss()  # binary classification
+    best_state = None
+    best_reward = -1.0
 
     model.train()
     for epoch in range(epochs):
@@ -113,17 +210,37 @@ def train_model(chunks, labels, epochs=10, batch_size=32, lr=1e-3, allow_single_
             loss.backward()
             optimizer.step()
             total_loss += loss.item() * batch_features.size(0)
-        print(f"Epoch {epoch+1}/{epochs} - Loss: {total_loss/len(dataset):.4f}")
+        message = f"Epoch {epoch+1}/{epochs} - Loss: {total_loss/len(dataset):.4f}"
+        if val_chunks:
+            val_reward, val_metrics = _evaluate_model(model, device, val_chunks, val_labels)
+            if val_reward > best_reward:
+                best_reward = val_reward
+                best_state = {
+                    key: value.detach().cpu().clone()
+                    for key, value in model.state_dict().items()
+                }
+            message += (
+                f" - ValReward: {val_reward:.4f}"
+                f" AP: {val_metrics['ap_score']:.4f}"
+                f" Recall: {val_metrics['bot_recall']:.4f}"
+                f" FPR: {val_metrics['fpr']:.4f}"
+            )
+            model.train()
+        print(message)
+
+    if best_state is not None:
+        model.load_state_dict(best_state)
+        print(f"Loaded best validation checkpoint with reward={best_reward:.4f}")
 
     return model, device
 
 # -----------------------------
 # 5️⃣ 예측 함수
 # -----------------------------
-def predict_scores(model, device, chunks):
+def predict_scores(model, device, chunks, batch_size=32):
     model.eval()
     dataset = Poker44Dataset(chunks, labels=[0]*len(chunks))  # dummy labels
-    loader = DataLoader(dataset, batch_size=32, shuffle=False)
+    loader = DataLoader(dataset, batch_size=batch_size, shuffle=False)
     scores = []
     with torch.no_grad():
         for batch_features, _ in loader:
@@ -145,6 +262,12 @@ if __name__ == "__main__":
     parser.add_argument("--epochs", type=int, default=20)
     parser.add_argument("--batch-size", type=int, default=32)
     parser.add_argument("--lr", type=float, default=1e-3)
+    parser.add_argument("--validation-split", type=float, default=0.2)
+    parser.add_argument(
+        "--validation-source-date",
+        help="Hold out one benchmark sourceDate for validation, e.g. 2026-05-06.",
+    )
+    parser.add_argument("--seed", type=int, default=44)
     parser.add_argument(
         "--model-out",
         default="saved_model/miner_model.pt",
@@ -160,7 +283,7 @@ if __name__ == "__main__":
     # Load dataset from gzipped JSON file
     dataset_path = args.dataset
     try:
-        train_chunks, train_labels = load_dataset(dataset_path)
+        train_chunks, train_labels, metadata = load_dataset(dataset_path, return_metadata=True)
     except FileNotFoundError:
         raise SystemExit(
             f"Dataset file not found: {dataset_path}\n"
@@ -178,6 +301,10 @@ if __name__ == "__main__":
         batch_size=args.batch_size,
         lr=args.lr,
         allow_single_class=args.allow_single_class,
+        validation_split=args.validation_split,
+        source_dates=metadata.get("sourceDates"),
+        validation_source_date=args.validation_source_date,
+        seed=args.seed,
     )
 
     # 예측

@@ -26,6 +26,12 @@ FEATURE_NAMES = [
     "hero_profit_bb",
 ]
 
+CHUNK_FEATURE_NAMES = [
+    f"{stat}_{name}"
+    for stat in ("mean", "std", "min", "max")
+    for name in FEATURE_NAMES
+]
+
 
 def _safe_float(value: Any, default: float = 0.0) -> float:
     try:
@@ -121,10 +127,11 @@ def extract_chunk_features(chunk: Any) -> List[float]:
     training files contain plain hand dicts, so this accepts both shapes.
     """
     if isinstance(chunk, dict):
-        return extract_hand_features(chunk)
+        features = extract_hand_features(chunk)
+        return features + [0.0] * len(FEATURE_NAMES) + features + features
 
     if not isinstance(chunk, list) or not chunk:
-        return [0.0] * len(FEATURE_NAMES)
+        return [0.0] * len(CHUNK_FEATURE_NAMES)
 
     hand_features = [
         extract_hand_features(hand)
@@ -132,12 +139,22 @@ def extract_chunk_features(chunk: Any) -> List[float]:
         if isinstance(hand, dict)
     ]
     if not hand_features:
-        return [0.0] * len(FEATURE_NAMES)
+        return [0.0] * len(CHUNK_FEATURE_NAMES)
 
-    return [
-        float(sum(values) / len(values))
-        for values in zip(*hand_features)
-    ]
+    means = []
+    stds = []
+    mins = []
+    maxs = []
+    for values in zip(*hand_features):
+        values = list(values)
+        mean = float(sum(values) / len(values))
+        variance = float(sum((value - mean) ** 2 for value in values) / len(values))
+        means.append(mean)
+        stds.append(variance ** 0.5)
+        mins.append(float(min(values)))
+        maxs.append(float(max(values)))
+
+    return means + stds + mins + maxs
 
 
 def normalize_label(label: Any) -> int:
