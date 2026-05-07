@@ -1,0 +1,117 @@
+{
+  "apiBase": "https://api.poker44.net/api/v1/benchmark",
+  "combined": {
+    "bot_chunks": 1660,
+    "bytes": 15998292,
+    "chunk_count": 3320,
+    "hand_count": 199297,
+    "human_chunks": 1660,
+    "max_hands_per_chunk": 80,
+    "min_hands_per_chunk": 40,
+    "path": "download/poker44_benchmark/poker44_benchmark_all.json.gz",
+    "sha256": "860b8426d06fa22ccf0e0c34e07aedd7e5cd27552f56b2be494099bd27202277"
+  },
+  "createdAt": "2026-05-07T20:18:13+00:00",
+  "releases": [
+    {
+      "bot_chunks": 220,
+      "bytes": 2166765,
+      "chunk_count": 440,
+      "hand_count": 26652,
+      "human_chunks": 220,
+      "max_hands_per_chunk": 80,
+      "min_hands_per_chunk": 40,
+      "path": "download/poker44_benchmark/poker44_benchmark_2026-05-06.json.gz",
+      "releaseVersion": "v1.1",
+      "sha256": "50dbe50a97b229495700da6c0c3a716230b222920e98230094223ad67b3f3ed5",
+      "sourceDate": "2026-05-06"
+    },
+    {
+      "bot_chunks": 240,
+      "bytes": 2229716,
+      "chunk_count": 480,
+      "hand_count": 28456,
+      "human_chunks": 240,
+      "max_hands_per_chunk": 80,
+      "min_hands_per_chunk": 40,
+      "path": "download/poker44_benchmark/poker44_benchmark_2026-05-05.json.gz",
+      "releaseVersion": "v1.1",
+      "sha256": "790d3c4627d4e48623e15e91eece622d9a34bad4fae333b968a9a44a0df84fbb",
+      "sourceDate": "2026-05-05"
+    },
+    {
+      "bot_chunks": 240,
+      "bytes": 2331207,
+      "chunk_count": 480,
+      "hand_count": 29126,
+      "human_chunks": 240,
+      "max_hands_per_chunk": 80,
+      "min_hands_per_chunk": 40,
+      "path": "download/poker44_benchmark/poker44_benchmark_2026-05-04.json.gz",
+      "releaseVersion": "v1.1",
+      "sha256": "ba3161f069ec0a0935515b5d0e9ba53f2e8374ba9377c9a3df61d696fd53c6a3",
+      "sourceDate": "2026-05-04"
+    },
+    {
+      "bot_chunks": 240,
+      "bytes": 2325669,
+      "chunk_count": 480,
+      "hand_count": 28617,
+      "human_chunks": 240,
+      "max_hands_per_chunk": 80,
+      "min_hands_per_chunk": 40,
+      "path": "download/poker44_benchmark/poker44_benchmark_2026-05-03.json.gz",
+      "releaseVersion": "v1.1",
+      "sha256": "5c48f65437ce7363405a7cf6a9db6cdc81750f0e3a1e4b6a15852326788ff5b4",
+      "sourceDate": "2026-05-03"
+    },
+    {
+      "bot_chunks": 240,
+      "bytes": 2307745,
+      "chunk_count": 480,
+      "hand_count": 28626,
+      "human_chunks": 240,
+      "max_hands_per_chunk": 80,
+      "min_hands_per_chunk": 40,
+      "path": "download/poker44_benchmark/poker44_benchmark_2026-05-02.json.gz",
+      "releaseVersion": "v1.1",
+      "sha256": "301219c4b19e936e57507ef98f0f9027ea89c88b413fc0cf398b22b33d8b6ab9",
+      "sourceDate": "2026-05-02"
+    },
+    {
+      "bot_chunks": 240,
+      "bytes": 2308685,
+      "chunk_count": 480,
+      "hand_count": 28621,
+      "human_chunks": 240,
+      "max_hands_per_chunk": 80,
+      "min_hands_per_chunk": 40,
+      "path": "download/poker44_benchmark/poker44_benchmark_2026-05-01.json.gz",
+      "releaseVersion": "v1.1",
+      "sha256": "1baf8c5bb330d21952f516fd789b4ed0361276fafd7c8a2ce5dbc2ee5659603c",
+      "sourceDate": "2026-05-01"
+    },
+    {
+      "bot_chunks": 240,
+      "bytes": 2338880,
+      "chunk_count": 480,
+      "hand_count": 29199,
+      "human_chunks": 240,
+      "max_hands_per_chunk": 80,
+      "min_hands_per_chunk": 40,
+      "path": "download/poker44_benchmark/poker44_benchmark_2026-04-30.json.gz",
+      "releaseVersion": "v1.1",
+      "sha256": "b3c519c623c61e7195d0fdb9217a67a89c53104aa6595edf5cc1a316d483cc37",
+      "sourceDate": "2026-04-30"
+    }
+  ],
+  "status": {
+    "currentUtcDate": "2026-05-07",
+    "cutoffWindowStart": "2026-04-30T00:00:00.000Z",
+    "latestReleasedAt": "2026-05-07 00:05:00.000893",
+    "latestSourceDate": "2026-05-06",
+    "releaseVersion": "v1.1",
+    "totalChunks": 83,
+    "totalHands": 199297
+  }
+}
