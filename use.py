@@ -86,7 +86,7 @@ class BenchmarkAutoTrainer:
         self.lock = threading.Lock()
         self.running = False
         self.last_started_at = 0.0
-        self.min_interval_seconds = int(os.getenv("POKER44_AUTO_RETRAIN_MIN_INTERVAL_SECONDS", "0"))
+        self.min_interval_seconds = int(os.getenv("POKER44_AUTO_RETRAIN_MIN_INTERVAL_SECONDS", "3600"))
         self.epochs = int(os.getenv("POKER44_AUTO_RETRAIN_EPOCHS", "5"))
         self.batch_size = int(os.getenv("POKER44_AUTO_RETRAIN_BATCH_SIZE", "64"))
         self.lr = float(os.getenv("POKER44_AUTO_RETRAIN_LR", "0.001"))
