@@ -25,7 +25,13 @@ class HandFeatureTests(unittest.TestCase):
         }
 
         hand_features = extract_hand_features(hand)
-        expected = hand_features + [0.0] * len(FEATURE_NAMES) + hand_features + hand_features
+        expected = (
+            hand_features
+            + [0.0] * len(FEATURE_NAMES)
+            + hand_features
+            + hand_features
+            + [0.0] * 12
+        )
 
         self.assertEqual(extract_chunk_features(hand), expected)
 
@@ -64,7 +70,20 @@ class HandFeatureTests(unittest.TestCase):
             max(a, b)
             for a, b in zip(extract_hand_features(hand_a), extract_hand_features(hand_b))
         ]
-        expected = means + stds + mins + maxs
+        expected = means + stds + mins + maxs + [
+            2 / 64,
+            1 / 3,
+            1.0,
+            0.0,
+            0.0,
+            0.85,
+            0.0,
+            1.0,
+            0.0,
+            1.0,
+            0.0,
+            1.0,
+        ]
 
         self.assertEqual(extract_chunk_features([hand_a, hand_b]), expected)
 

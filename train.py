@@ -8,8 +8,8 @@ import json
 import argparse
 from collections import Counter
 
-from poker44.utils.hand_features import extract_chunk_features, normalize_label
-from poker44.utils.miner_model import MinerNet
+from poker44.utils.hand_features import CHUNK_FEATURE_NAMES, extract_chunk_features, normalize_label
+from poker44.utils.miner_model import MODEL_ARCHITECTURE_VERSION, MinerNet, apply_score_shift, logit
 
 # -----------------------------
 # 1️⃣ Dataset 정의
@@ -149,8 +149,62 @@ def _reward(y_pred, y_true):
     }
 
 
-def _evaluate_model(model, device, chunks, labels, batch_size=128):
-    scores = np.asarray(predict_scores(model, device, chunks, batch_size=batch_size), dtype=np.float32)
+def _shift_scores_for_threshold(scores, threshold):
+    clipped = np.clip(scores, 1e-6, 1 - 1e-6)
+    logits = np.log(clipped / np.clip(1 - clipped, 1e-6, 1))
+    return 1.0 / (1.0 + np.exp(-(logits - logit(threshold))))
+
+
+def _calibrate_human_safe_shift(scores, labels, max_human_fpr=0.03):
+    scores = np.asarray(scores, dtype=np.float32)
+    labels = np.asarray(labels, dtype=np.int64)
+    candidates = sorted(set(float(score) for score in scores), reverse=True)
+    human_scores = scores[labels == 0]
+    if human_scores.size:
+        candidates.extend(
+            float(np.quantile(human_scores, quantile))
+            for quantile in (0.90, 0.95, 0.97, 0.99, 1.0)
+        )
+    candidates.extend([0.5, 0.9, 0.99, 1.0])
+    best_threshold = 0.5
+    best_reward = -1.0
+    best_metrics = None
+    for threshold in sorted(set(candidates), reverse=True):
+        shifted_scores = _shift_scores_for_threshold(scores, threshold)
+        reward_value, metrics = _reward(shifted_scores, labels)
+        better_reward = reward_value > best_reward + 1e-9
+        safer_tie = (
+            abs(reward_value - best_reward) <= 1e-9
+            and best_metrics is not None
+            and metrics["fpr"] < best_metrics["fpr"]
+        )
+        if metrics["fpr"] <= max_human_fpr and (better_reward or safer_tie):
+            best_threshold = threshold
+            best_reward = reward_value
+            best_metrics = metrics
+    if best_metrics is None:
+        best_metrics = _reward(scores, labels)[1]
+    return -logit(best_threshold), best_threshold, best_reward, best_metrics
+
+
+def _class_loss_weights(labels, human_loss_weight=1.35):
+    counts = Counter(int(label) for label in labels)
+    total = max(1, sum(counts.values()))
+    class_count = max(1, len(counts))
+    human_weight = total / (class_count * max(1, counts.get(0, 0)))
+    bot_weight = total / (class_count * max(1, counts.get(1, 0)))
+    human_weight *= float(human_loss_weight)
+    return {
+        0: float(human_weight),
+        1: float(bot_weight),
+    }
+
+
+def _evaluate_model(model, device, chunks, labels, batch_size=128, score_shift=0.0):
+    scores = np.asarray(
+        predict_scores(model, device, chunks, batch_size=batch_size, score_shift=score_shift),
+        dtype=np.float32,
+    )
     labels_array = np.asarray(labels, dtype=np.int64)
     reward_value, metrics = _reward(scores, labels_array)
     return reward_value, metrics
@@ -166,6 +220,10 @@ def train_model(
     validation_split=0.2,
     source_dates=None,
     validation_source_date=None,
+    max_human_fpr=0.03,
+    human_loss_weight=1.35,
+    human_margin_weight=0.35,
+    bot_margin_weight=0.10,
     seed=44,
 ):
     label_counts = Counter(labels)
@@ -193,9 +251,17 @@ def train_model(
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     model = MinerNet().to(device)
     optimizer = torch.optim.Adam(model.parameters(), lr=lr)
-    criterion = nn.BCELoss()  # binary classification
+    criterion = nn.BCELoss(reduction="none")
+    loss_weights = _class_loss_weights(train_labels, human_loss_weight=human_loss_weight)
+    class_weight_tensor = torch.tensor(
+        [loss_weights[0], loss_weights[1]],
+        dtype=torch.float32,
+        device=device,
+    )
     best_state = None
     best_reward = -1.0
+    best_score_shift = 0.0
+    best_threshold = 0.5
 
     model.train()
     for epoch in range(epochs):
@@ -206,15 +272,40 @@ def train_model(
 
             optimizer.zero_grad()
             outputs = model(batch_features)
-            loss = criterion(outputs, batch_labels)
+            batch_weights = torch.where(
+                batch_labels >= 0.5,
+                class_weight_tensor[1],
+                class_weight_tensor[0],
+            )
+            loss = (criterion(outputs, batch_labels) * batch_weights).mean()
+            human_scores = outputs[batch_labels < 0.5]
+            if human_scores.numel():
+                loss = loss + float(human_margin_weight) * torch.relu(
+                    human_scores - 0.45
+                ).pow(2).mean()
+            bot_scores = outputs[batch_labels >= 0.5]
+            if bot_scores.numel():
+                loss = loss + float(bot_margin_weight) * torch.relu(
+                    0.55 - bot_scores
+                ).pow(2).mean()
             loss.backward()
             optimizer.step()
             total_loss += loss.item() * batch_features.size(0)
         message = f"Epoch {epoch+1}/{epochs} - Loss: {total_loss/len(dataset):.4f}"
         if val_chunks:
-            val_reward, val_metrics = _evaluate_model(model, device, val_chunks, val_labels)
+            raw_val_scores = np.asarray(
+                predict_scores(model, device, val_chunks, batch_size=128),
+                dtype=np.float32,
+            )
+            score_shift, threshold, val_reward, val_metrics = _calibrate_human_safe_shift(
+                raw_val_scores,
+                val_labels,
+                max_human_fpr=max_human_fpr,
+            )
             if val_reward > best_reward:
                 best_reward = val_reward
+                best_score_shift = score_shift
+                best_threshold = threshold
                 best_state = {
                     key: value.detach().cpu().clone()
                     for key, value in model.state_dict().items()
@@ -230,14 +321,22 @@ def train_model(
 
     if best_state is not None:
         model.load_state_dict(best_state)
-        print(f"Loaded best validation checkpoint with reward={best_reward:.4f}")
+        model.score_shift = float(best_score_shift)
+        model.decision_threshold = float(best_threshold)
+        print(
+            f"Loaded best validation checkpoint with reward={best_reward:.4f} "
+            f"threshold={best_threshold:.6f} score_shift={best_score_shift:.6f}"
+        )
+    else:
+        model.score_shift = 0.0
+        model.decision_threshold = 0.5
 
     return model, device
 
 # -----------------------------
 # 5️⃣ 예측 함수
 # -----------------------------
-def predict_scores(model, device, chunks, batch_size=32):
+def predict_scores(model, device, chunks, batch_size=32, score_shift=None):
     model.eval()
     dataset = Poker44Dataset(chunks, labels=[0]*len(chunks))  # dummy labels
     loader = DataLoader(dataset, batch_size=batch_size, shuffle=False)
@@ -246,6 +345,8 @@ def predict_scores(model, device, chunks, batch_size=32):
         for batch_features, _ in loader:
             batch_features = batch_features.to(device)
             outputs = model(batch_features)
+            shift = getattr(model, "score_shift", 0.0) if score_shift is None else score_shift
+            outputs = apply_score_shift(outputs, shift)
             scores.extend(outputs.cpu().numpy().tolist())
     return scores
 
@@ -268,6 +369,30 @@ if __name__ == "__main__":
         help="Hold out one benchmark sourceDate for validation, e.g. 2026-05-06.",
     )
     parser.add_argument("--seed", type=int, default=44)
+    parser.add_argument(
+        "--max-human-fpr",
+        type=float,
+        default=0.03,
+        help="Maximum validation human false-positive rate used for score calibration.",
+    )
+    parser.add_argument(
+        "--human-loss-weight",
+        type=float,
+        default=1.35,
+        help="Extra BCE weight for human examples to reduce validator false positives.",
+    )
+    parser.add_argument(
+        "--human-margin-weight",
+        type=float,
+        default=0.35,
+        help="Penalty weight for validation-aligned human scores above 0.45.",
+    )
+    parser.add_argument(
+        "--bot-margin-weight",
+        type=float,
+        default=0.10,
+        help="Small penalty weight for bot scores below 0.55.",
+    )
     parser.add_argument(
         "--model-out",
         default="saved_model/miner_model.pt",
@@ -304,6 +429,10 @@ if __name__ == "__main__":
         validation_split=args.validation_split,
         source_dates=metadata.get("sourceDates"),
         validation_source_date=args.validation_source_date,
+        max_human_fpr=args.max_human_fpr,
+        human_loss_weight=args.human_loss_weight,
+        human_margin_weight=args.human_margin_weight,
+        bot_margin_weight=args.bot_margin_weight,
         seed=args.seed,
     )
 
@@ -321,5 +450,16 @@ if __name__ == "__main__":
     model_dir = os.path.dirname(model_out)
     if model_dir:
         os.makedirs(model_dir, exist_ok=True)
-    torch.save(model.state_dict(), model_out)
+    checkpoint = {
+        "model_state_dict": model.state_dict(),
+        "score_shift": float(getattr(model, "score_shift", 0.0)),
+        "decision_threshold": float(getattr(model, "decision_threshold", 0.5)),
+        "feature_names": CHUNK_FEATURE_NAMES,
+        "model_architecture_version": MODEL_ARCHITECTURE_VERSION,
+        "max_human_fpr": args.max_human_fpr,
+        "human_loss_weight": args.human_loss_weight,
+        "human_margin_weight": args.human_margin_weight,
+        "bot_margin_weight": args.bot_margin_weight,
+    }
+    torch.save(checkpoint, model_out)
     print(f"Saved model to {model_out}")

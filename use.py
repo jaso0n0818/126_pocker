@@ -11,7 +11,7 @@ import time
 from pathlib import Path
 
 from poker44.utils.hand_features import extract_chunk_features
-from poker44.utils.miner_model import MinerNet
+from poker44.utils.miner_model import MinerNet, apply_score_shift
 
 
 REPO_ROOT = Path(__file__).resolve().parent
@@ -44,6 +44,7 @@ class Poker44Miner:
         self.model = MinerNet().to(self.device)
         self.model_path = Path(model_path) if model_path else None
         self._model_lock = threading.Lock()
+        self._score_shift = 0.0
         self.reload_model()
         self.model.eval()
         self.reward_window = 20  # validator 기준
@@ -52,7 +53,14 @@ class Poker44Miner:
         if not self.model_path or not self.model_path.exists():
             return False
         with self._model_lock:
-            self.model.load_state_dict(torch.load(self.model_path, map_location=self.device))
+            checkpoint = torch.load(self.model_path, map_location=self.device)
+            if isinstance(checkpoint, dict) and "model_state_dict" in checkpoint:
+                state_dict = checkpoint["model_state_dict"]
+                self._score_shift = float(checkpoint.get("score_shift", 0.0) or 0.0)
+            else:
+                state_dict = checkpoint
+                self._score_shift = 0.0
+            self.model.load_state_dict(state_dict)
             self.model.eval()
         print(f"[INFO] 모델 로드 완료: {self.model_path}")
         return True
@@ -66,6 +74,7 @@ class Poker44Miner:
                 batch = batch.to(self.device)
                 with self._model_lock:
                     preds = self.model(batch)
+                    preds = apply_score_shift(preds, self._score_shift)
                 scores.extend(preds.cpu().numpy().tolist())
         return scores
 
@@ -81,6 +90,11 @@ class BenchmarkAutoTrainer:
         self.epochs = int(os.getenv("POKER44_AUTO_RETRAIN_EPOCHS", "5"))
         self.batch_size = int(os.getenv("POKER44_AUTO_RETRAIN_BATCH_SIZE", "64"))
         self.lr = float(os.getenv("POKER44_AUTO_RETRAIN_LR", "0.001"))
+        self.max_human_fpr = float(os.getenv("POKER44_AUTO_RETRAIN_MAX_HUMAN_FPR", "0.03"))
+        self.human_loss_weight = float(os.getenv("POKER44_AUTO_RETRAIN_HUMAN_LOSS_WEIGHT", "1.35"))
+        self.human_margin_weight = float(os.getenv("POKER44_AUTO_RETRAIN_HUMAN_MARGIN_WEIGHT", "0.35"))
+        self.bot_margin_weight = float(os.getenv("POKER44_AUTO_RETRAIN_BOT_MARGIN_WEIGHT", "0.10"))
+        self.validation_source_date = os.getenv("POKER44_AUTO_RETRAIN_VALIDATION_SOURCE_DATE", "")
         self.register_path = Path(os.getenv("POKER44_BENCHMARK_REGISTER", str(DEFAULT_REGISTER_PATH)))
         self.dataset_path = Path(os.getenv("POKER44_BENCHMARK_DATASET", str(DEFAULT_DATASET_PATH)))
         self.model_path = Path(os.getenv("POKER44_MODEL_PATH", str(DEFAULT_MODEL_PATH)))
@@ -149,9 +163,22 @@ class BenchmarkAutoTrainer:
                     str(self.batch_size),
                     "--lr",
                     str(self.lr),
+                    "--max-human-fpr",
+                    str(self.max_human_fpr),
+                    "--human-loss-weight",
+                    str(self.human_loss_weight),
+                    "--human-margin-weight",
+                    str(self.human_margin_weight),
+                    "--bot-margin-weight",
+                    str(self.bot_margin_weight),
                     "--model-out",
                     str(self.model_path),
                 ]
+                + (
+                    ["--validation-source-date", self.validation_source_date]
+                    if self.validation_source_date
+                    else []
+                )
             )
             state.update(
                 {
@@ -162,6 +189,11 @@ class BenchmarkAutoTrainer:
                     "epochs": self.epochs,
                     "batch_size": self.batch_size,
                     "lr": self.lr,
+                    "max_human_fpr": self.max_human_fpr,
+                    "human_loss_weight": self.human_loss_weight,
+                    "human_margin_weight": self.human_margin_weight,
+                    "bot_margin_weight": self.bot_margin_weight,
+                    "validation_source_date": self.validation_source_date,
                 }
             )
             self._save_state(state)

@@ -13,7 +13,7 @@ from typing import Tuple
 
 import bittensor as bt
 
-from poker44.utils.hand_features import extract_chunk_features, extract_hand_features
+from poker44.utils.hand_features import FEATURE_NAMES, extract_chunk_features, extract_hand_features
 from poker44.base.miner import BaseMinerNeuron
 from poker44.utils.model_manifest import (
     build_local_model_manifest,
@@ -62,6 +62,7 @@ class Miner(BaseMinerNeuron):
         self._model_lock = threading.Lock()
         self._torch_model = None
         self._torch_device = None
+        self._score_shift = 0.0
         if self.use_trained_model:
             self._load_torch_model()
         
@@ -165,11 +166,19 @@ class Miner(BaseMinerNeuron):
                 return False
             device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
             model = MinerNet().to(device)
-            model.load_state_dict(torch.load(self.model_path, map_location=device))
+            checkpoint = torch.load(self.model_path, map_location=device)
+            if isinstance(checkpoint, dict) and "model_state_dict" in checkpoint:
+                state_dict = checkpoint["model_state_dict"]
+                score_shift = float(checkpoint.get("score_shift", 0.0) or 0.0)
+            else:
+                state_dict = checkpoint
+                score_shift = 0.0
+            model.load_state_dict(state_dict)
             model.eval()
             with self._model_lock:
                 self._torch_device = device
                 self._torch_model = model
+                self._score_shift = score_shift
             bt.logging.info(f"Loaded trained Poker44 model: {self.model_path}")
             return True
         except Exception as exc:
@@ -179,6 +188,7 @@ class Miner(BaseMinerNeuron):
     def _score_chunks_with_torch_model(self, chunks: list[list[dict]]) -> list[float] | None:
         try:
             import torch
+            from poker44.utils.miner_model import apply_score_shift
 
             features = [extract_chunk_features(chunk) for chunk in chunks]
             if not features:
@@ -189,6 +199,7 @@ class Miner(BaseMinerNeuron):
                 batch = torch.tensor(features, dtype=torch.float32).to(self._torch_device)
                 with torch.no_grad():
                     outputs = self._torch_model(batch)
+                    outputs = apply_score_shift(outputs, self._score_shift)
                 return [round(float(score), 6) for score in outputs.cpu().numpy().tolist()]
         except Exception as exc:
             bt.logging.warning(f"Trained model scoring failed; falling back to heuristic: {exc}")
@@ -216,6 +227,11 @@ class Miner(BaseMinerNeuron):
             epochs = os.getenv("POKER44_AUTO_RETRAIN_EPOCHS", "5")
             batch_size = os.getenv("POKER44_AUTO_RETRAIN_BATCH_SIZE", "64")
             lr = os.getenv("POKER44_AUTO_RETRAIN_LR", "0.001")
+            max_human_fpr = os.getenv("POKER44_AUTO_RETRAIN_MAX_HUMAN_FPR", "0.03")
+            human_loss_weight = os.getenv("POKER44_AUTO_RETRAIN_HUMAN_LOSS_WEIGHT", "1.35")
+            human_margin_weight = os.getenv("POKER44_AUTO_RETRAIN_HUMAN_MARGIN_WEIGHT", "0.35")
+            bot_margin_weight = os.getenv("POKER44_AUTO_RETRAIN_BOT_MARGIN_WEIGHT", "0.10")
+            validation_source_date = os.getenv("POKER44_AUTO_RETRAIN_VALIDATION_SOURCE_DATE", "")
             subprocess.run([sys.executable, str(downloader)], cwd=self.repo_root, check=True)
             dataset_sha = self._current_benchmark_dataset_sha()
             state = self._load_auto_retrain_state()
@@ -239,9 +255,22 @@ class Miner(BaseMinerNeuron):
                     batch_size,
                     "--lr",
                     lr,
+                    "--max-human-fpr",
+                    max_human_fpr,
+                    "--human-loss-weight",
+                    human_loss_weight,
+                    "--human-margin-weight",
+                    human_margin_weight,
+                    "--bot-margin-weight",
+                    bot_margin_weight,
                     "--model-out",
                     str(self.model_path),
-                ],
+                ]
+                + (
+                    ["--validation-source-date", validation_source_date]
+                    if validation_source_date
+                    else []
+                ),
                 cwd=self.repo_root,
                 check=True,
             )
@@ -254,6 +283,11 @@ class Miner(BaseMinerNeuron):
                     "epochs": epochs,
                     "batch_size": batch_size,
                     "lr": lr,
+                    "max_human_fpr": max_human_fpr,
+                    "human_loss_weight": human_loss_weight,
+                    "human_margin_weight": human_margin_weight,
+                    "bot_margin_weight": bot_margin_weight,
+                    "validation_source_date": validation_source_date,
                 }
             )
             self._save_auto_retrain_state(state)
@@ -296,35 +330,25 @@ class Miner(BaseMinerNeuron):
         # normalized stake sizing, and showdown behavior while penalizing passive or
         # overly defensive play. This mirrors the idea of behavioral signatures
         # used to separate human and AI play patterns.
-        (
-            num_actions,
-            street_depth,
-            showdown,
-            aggression_ratio,
-            raise_ratio,
-            call_ratio,
-            check_ratio,
-            fold_ratio,
-            avg_normalized_amount_bb,
-            max_normalized_amount_bb,
-            pot_growth_bb,
-            hero_stack_bb,
-            hero_profit_bb,
-        ) = extract_hand_features(hand)
+        features = dict(zip(FEATURE_NAMES, extract_hand_features(hand)))
 
         score = 0.0
-        score += 0.18 * street_depth
-        score += 0.18 * aggression_ratio
-        score += 0.14 * raise_ratio
-        score += 0.08 * max_normalized_amount_bb
-        score += 0.08 * avg_normalized_amount_bb
-        score += 0.12 * showdown
-        score += 0.07 * pot_growth_bb
-        score += 0.05 * hero_stack_bb
-        score += 0.04 * hero_profit_bb
-        score -= 0.18 * fold_ratio
-        score -= 0.10 * call_ratio
-        score -= 0.06 * check_ratio
+        score += 0.14 * features.get("street_depth", 0.0)
+        score += 0.16 * features.get("aggression_ratio", 0.0)
+        score += 0.12 * features.get("raise_ratio", 0.0)
+        score += 0.07 * features.get("max_normalized_amount_bb", 0.0)
+        score += 0.06 * features.get("avg_normalized_amount_bb", 0.0)
+        score += 0.08 * features.get("showdown", 0.0)
+        score += 0.05 * features.get("pot_growth_bb", 0.0)
+        score += 0.04 * features.get("hero_stack_bb", 0.0)
+        score += 0.03 * features.get("hero_profit_bb", 0.0)
+        score += 0.08 * features.get("aggressive_street_coverage", 0.0)
+        score += 0.05 * features.get("hero_aggression_ratio", 0.0)
+        score += 0.04 * features.get("large_bet_ratio", 0.0)
+        score -= 0.16 * features.get("fold_ratio", 0.0)
+        score -= 0.08 * features.get("call_ratio", 0.0)
+        score -= 0.05 * features.get("check_ratio", 0.0)
+        score -= 0.07 * features.get("passive_ratio", 0.0)
 
         return cls._clamp01(score)
 
