@@ -39,6 +39,15 @@ class Miner(BaseMinerNeuron):
         self.repo_root = repo_root
         self.auto_retrain_enabled = _env_bool("POKER44_AUTO_RETRAIN", False)
         self.use_trained_model = _env_bool("POKER44_USE_TRAINED_MODEL", False)
+        self.log_validator_requests = _env_bool("POKER44_LOG_VALIDATOR_REQUESTS", True)
+        self.log_full_request_payload = _env_bool("POKER44_LOG_FULL_REQUEST_PAYLOAD", False)
+        self.validator_request_log_path = Path(
+            os.getenv(
+                "POKER44_VALIDATOR_REQUEST_LOG_PATH",
+                str(repo_root / "logs" / "miner_requests" / "validator_requests.jsonl"),
+            )
+        )
+        self._request_log_lock = threading.Lock()
         self.model_path = Path(
             os.getenv("POKER44_MODEL_PATH", str(repo_root / "saved_model" / "miner_model.pt"))
         )
@@ -139,15 +148,61 @@ class Miner(BaseMinerNeuron):
 
     async def forward(self, synapse: DetectionSynapse) -> DetectionSynapse:
         """Assign one deterministic bot-risk score per chunk."""
+        started_at = time.time()
         chunks = synapse.chunks or []
-        scores = self._score_chunks(chunks)
-        synapse.risk_scores = scores
-        synapse.predictions = [s >= 0.5 for s in scores]
-        synapse.model_manifest = dict(self.model_manifest)
-        bt.logging.info(f"Miner Predctions: {synapse.predictions}")
-        bt.logging.info(f"Scored {len(chunks)} chunks with heuristic risks.")
-        self._trigger_auto_retrain()
-        return synapse
+        error = None
+        try:
+            scores = self._score_chunks(chunks)
+            synapse.risk_scores = scores
+            synapse.predictions = [s >= 0.5 for s in scores]
+            synapse.model_manifest = dict(self.model_manifest)
+            bt.logging.info(f"Miner Predctions: {synapse.predictions}")
+            bt.logging.info(f"Scored {len(chunks)} chunks with heuristic risks.")
+            self._trigger_auto_retrain()
+            return synapse
+        except Exception as exc:
+            error = str(exc)
+            raise
+        finally:
+            self._record_validator_request(synapse, chunks, started_at, error)
+
+    def _record_validator_request(
+        self,
+        synapse: DetectionSynapse,
+        chunks: list[list[dict]],
+        started_at: float,
+        error: str | None,
+    ) -> None:
+        if not self.log_validator_requests:
+            return
+
+        dendrite = getattr(synapse, "dendrite", None)
+        chunk_sizes = [len(chunk) for chunk in chunks]
+        record = {
+            "timestamp": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+            "validator_hotkey": getattr(dendrite, "hotkey", None),
+            "validator_ip": getattr(dendrite, "ip", None),
+            "validator_port": getattr(dendrite, "port", None),
+            "chunk_count": len(chunks),
+            "hand_count": sum(chunk_sizes),
+            "chunk_sizes": chunk_sizes,
+            "risk_scores": getattr(synapse, "risk_scores", None),
+            "predictions": getattr(synapse, "predictions", None),
+            "model_manifest_digest": self.manifest_digest,
+            "duration_ms": round((time.time() - started_at) * 1000, 3),
+            "error": error,
+        }
+        if self.log_full_request_payload:
+            record["chunks"] = chunks
+
+        try:
+            self.validator_request_log_path.parent.mkdir(parents=True, exist_ok=True)
+            line = json.dumps(record, ensure_ascii=False, sort_keys=True) + "\n"
+            with self._request_log_lock:
+                with self.validator_request_log_path.open("a", encoding="utf-8") as handle:
+                    handle.write(line)
+        except Exception as exc:
+            bt.logging.warning(f"Failed to write validator request log: {exc}")
 
     def _score_chunks(self, chunks: list[list[dict]]) -> list[float]:
         if self.use_trained_model and self._torch_model is not None:
