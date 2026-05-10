@@ -186,7 +186,17 @@ class BaseMinerNeuron(BaseNeuron):
         bt.logging.info(
             f"Serving miner axon {self.axon} on network: {self.config.subtensor.chain_endpoint} with netuid: {self.config.netuid}"
         )
-        self.axon.serve(netuid=self.config.netuid, subtensor=self.subtensor)
+        try:
+            self.axon.serve(netuid=self.config.netuid, subtensor=self.subtensor)
+        except Exception as exc:
+            if not self._is_serving_rate_limit_error(exc):
+                raise
+            bt.logging.warning(
+                "Axon serve transaction was rate limited by subtensor "
+                "(Custom error: 12 / ServingRateLimitExceeded). Starting the local "
+                "axon anyway; validators can use the most recently published "
+                "on-chain endpoint if the IP and port are unchanged."
+            )
 
         # Start  starts the miner's axon, making it active on the network.
         self.axon.start()
@@ -245,6 +255,14 @@ class BaseMinerNeuron(BaseNeuron):
                 self.thread.join(5)
             self.is_running = False
             bt.logging.debug("Stopped")
+
+    @staticmethod
+    def _is_serving_rate_limit_error(exc: Exception) -> bool:
+        message = str(exc)
+        return (
+            "Custom error: 12" in message
+            or "ServingRateLimitExceeded" in message
+        )
 
     def __enter__(self):
         """

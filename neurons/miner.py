@@ -214,20 +214,20 @@ class Miner(BaseMinerNeuron):
     def _load_torch_model(self) -> bool:
         try:
             import torch
-            from poker44.utils.miner_model import MinerNet
+            from poker44.utils.miner_model import build_model_for_state_dict, normalize_state_dict
 
             if not self.model_path.exists():
                 bt.logging.warning(f"Trained model file not found: {self.model_path}")
                 return False
             device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-            model = MinerNet().to(device)
             checkpoint = torch.load(self.model_path, map_location=device)
             if isinstance(checkpoint, dict) and "model_state_dict" in checkpoint:
-                state_dict = checkpoint["model_state_dict"]
+                state_dict = normalize_state_dict(checkpoint["model_state_dict"])
                 score_shift = float(checkpoint.get("score_shift", 0.0) or 0.0)
             else:
-                state_dict = checkpoint
+                state_dict = normalize_state_dict(checkpoint)
                 score_shift = 0.0
+            model = build_model_for_state_dict(state_dict).to(device)
             model.load_state_dict(state_dict)
             model.eval()
             with self._model_lock:
@@ -243,9 +243,17 @@ class Miner(BaseMinerNeuron):
     def _score_chunks_with_torch_model(self, chunks: list[list[dict]]) -> list[float] | None:
         try:
             import torch
-            from poker44.utils.miner_model import apply_score_shift
+            from poker44.utils.miner_model import (
+                apply_score_shift,
+                legacy_chunk_features,
+                model_input_dim,
+            )
 
-            features = [extract_chunk_features(chunk) for chunk in chunks]
+            input_dim = model_input_dim(self._torch_model)
+            if input_dim is None:
+                features = [extract_chunk_features(chunk) for chunk in chunks]
+            else:
+                features = [legacy_chunk_features(chunk, input_dim) for chunk in chunks]
             if not features:
                 return []
             with self._model_lock:
